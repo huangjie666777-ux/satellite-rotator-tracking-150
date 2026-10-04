@@ -6,9 +6,12 @@ from fastapi.responses import Response
 
 from .delivery import build_zip, interval_csv_rows, interval_to_dict, render_csv
 from .passes import HorizonMask, PropagationError, Site, find_passes
+from .player import controller
 from .schemas import (MAX_EPOCH_AGE, ForecastRequest, ForecastResponse,
-                      IntervalOut)
+                      IntervalOut, PlayRequest, TrackPlanRequest,
+                      TrackPlanResponse, TrackTargetOut)
 from .tle import TLEError, parse_tle
+from .tracker import MechLimits, PlanError, plan_track
 
 app = FastAPI(title="Offline Pass Forecast", version="1.0.0")
 
@@ -33,9 +36,10 @@ def _prepare(req: ForecastRequest):
             tle = parse_tle(s.tle_line1, s.tle_line2)
             age_start = req.window.start - tle.epoch
             age_end = req.window.end - tle.epoch
-            if age_start > MAX_EPOCH_AGE or age_end < -MAX_EPOCH_AGE:
+            if (not -MAX_EPOCH_AGE <= age_start <= MAX_EPOCH_AGE
+                    or not -MAX_EPOCH_AGE <= age_end <= MAX_EPOCH_AGE):
                 raise TLEError(
-                    f"satellite {s.id}: query window is more than 7 days "
+                    f"satellite {s.id}: query window end is more than 7 days "
                     f"from the TLE epoch {tle.epoch.isoformat()}")
             sats.append((s, tle))
     except TLEError as exc:
@@ -98,3 +102,62 @@ def forecast_download(req: ForecastRequest):
 def health():
     return {"status": "ok"}
 
+
+def _build_plan(req: TrackPlanRequest):
+    results = _compute(req.forecast)
+    if req.interval_index >= len(results):
+        raise HTTPException(
+            status_code=422,
+            detail=f"interval_index {req.interval_index} out of range: "
+                   f"{len(results)} interval(s) found")
+    sat_in, tle, site, iv = results[req.interval_index]
+    m = req.mechanics
+    lim = MechLimits(az_min=m.az_min_deg, az_max=m.az_max_deg,
+                     el_min=m.el_min_deg, el_max=m.el_max_deg,
+                     max_az_rate=m.max_az_rate_dps,
+                     max_el_rate=m.max_el_rate_dps)
+    try:
+        targets = plan_track(tle.satrec, site, iv, lim,
+                             current=(m.current_az_deg, m.current_el_deg),
+                             park=(m.park_az_deg, m.park_el_deg),
+                             preset_s=m.preset_s, park_s=m.park_s)
+    except PlanError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return sat_in, site, iv, targets
+
+
+@app.post("/api/track/plan", response_model=TrackPlanResponse)
+def track_plan(req: TrackPlanRequest):
+    sat_in, site, iv, targets = _build_plan(req)
+    total_az = sum(abs(b.az_deg - a.az_deg)
+                   for a, b in zip(targets, targets[1:]))
+    return TrackPlanResponse(
+        interval=IntervalOut(**interval_to_dict(sat_in.id, site.station_id, iv)),
+        target_count=len(targets),
+        total_az_travel_deg=round(total_az, 3),
+        targets=[TrackTargetOut(t_rel_s=round(t.t_rel_s, 3),
+                                az_deg=round(t.az_deg, 3),
+                                el_deg=round(t.el_deg, 3), phase=t.phase)
+                 for t in targets])
+
+
+@app.post("/api/track/play")
+def track_play(req: PlayRequest):
+    _sat, _site, _iv, targets = _build_plan(req.plan)
+    try:
+        controller.start(targets, req.rotctld.host, req.rotctld.port,
+                         timeout=req.rotctld.timeout_s)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"state": "running", "targets_total": len(targets)}
+
+
+@app.get("/api/track/status")
+def track_status():
+    return controller.status().to_dict()
+
+
+@app.post("/api/track/cancel")
+def track_cancel():
+    cancelled = controller.cancel()
+    return {"cancelled": cancelled, "state": controller.status().state}

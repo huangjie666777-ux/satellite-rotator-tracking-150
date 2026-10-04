@@ -96,12 +96,13 @@ def _margin(satrec, site: Site, dt: datetime) -> float:
 def _bisect_crossing(satrec, site, t_before, t_after) -> datetime:
     """t_before has margin <= 0, t_after > 0 (or vice versa); find crossing."""
     lo, hi = t_before, t_after
+    pos_at_lo = _margin(satrec, site, lo) > 0.0
     while (hi - lo).total_seconds() > BISECT_TOL_S:
         mid = lo + (hi - lo) / 2
-        if _margin(satrec, site, mid) > 0.0:
-            hi = mid
-        else:
+        if (_margin(satrec, site, mid) > 0.0) == pos_at_lo:
             lo = mid
+        else:
+            hi = mid
     return hi
 
 

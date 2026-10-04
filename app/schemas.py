@@ -90,3 +90,69 @@ class ForecastResponse(BaseModel):
     interval_count: int
     intervals: list[IntervalOut]
     notes: list[str]
+
+
+MAX_AZ_SPAN_DEG = 720.0
+
+
+class TrackMechanics(BaseModel):
+    az_min_deg: float = Field(allow_inf_nan=False)
+    az_max_deg: float = Field(allow_inf_nan=False)
+    el_min_deg: float = Field(ge=0.0, le=90.0, allow_inf_nan=False)
+    el_max_deg: float = Field(ge=0.0, le=90.0, allow_inf_nan=False)
+    max_az_rate_dps: float = Field(gt=0.0, allow_inf_nan=False)
+    max_el_rate_dps: float = Field(gt=0.0, allow_inf_nan=False)
+    current_az_deg: float = Field(allow_inf_nan=False)
+    current_el_deg: float = Field(allow_inf_nan=False)
+    park_az_deg: float = Field(allow_inf_nan=False)
+    park_el_deg: float = Field(allow_inf_nan=False)
+    preset_s: float = Field(gt=0.0, allow_inf_nan=False)
+    park_s: float = Field(gt=0.0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _check(self):
+        if self.az_max_deg <= self.az_min_deg:
+            raise ValueError("az_max_deg must exceed az_min_deg")
+        if self.az_max_deg - self.az_min_deg > MAX_AZ_SPAN_DEG:
+            raise ValueError("azimuth span must not exceed 720 deg")
+        if self.el_max_deg <= self.el_min_deg:
+            raise ValueError("el_max_deg must exceed el_min_deg")
+        for name in ("current", "park"):
+            az = getattr(self, f"{name}_az_deg")
+            el = getattr(self, f"{name}_el_deg")
+            if not self.az_min_deg <= az <= self.az_max_deg:
+                raise ValueError(f"{name} azimuth outside mechanical limits")
+            if not self.el_min_deg <= el <= self.el_max_deg:
+                raise ValueError(f"{name} elevation outside mechanical limits")
+        return self
+
+
+class TrackPlanRequest(BaseModel):
+    forecast: ForecastRequest
+    interval_index: int = Field(ge=0)
+    mechanics: TrackMechanics
+
+
+class TrackTargetOut(BaseModel):
+    t_rel_s: float
+    az_deg: float
+    el_deg: float
+    phase: str
+
+
+class TrackPlanResponse(BaseModel):
+    interval: IntervalOut
+    target_count: int
+    total_az_travel_deg: float
+    targets: list[TrackTargetOut]
+
+
+class RotctldEndpoint(BaseModel):
+    host: str = "127.0.0.1"
+    port: int = Field(default=4533, ge=1, le=65535)
+    timeout_s: float = Field(default=5.0, gt=0.0, allow_inf_nan=False)
+
+
+class PlayRequest(BaseModel):
+    plan: TrackPlanRequest
+    rotctld: RotctldEndpoint = RotctldEndpoint()

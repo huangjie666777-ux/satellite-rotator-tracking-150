@@ -27,7 +27,17 @@ def interval_csv_rows(satrec, site: Site, interval: PassInterval,
     t = interval.start.replace(microsecond=0)
     if t < interval.start:
         t += timedelta(seconds=1)
+    emitted_end = False
     while t <= interval.end:
+        emitted_end = t == interval.end
+        yield _row(satrec, site, t, downlink_hz)
+        t += timedelta(seconds=1)
+    if not emitted_end:
+        # keep the fractional-second tail: emit the exact interval end
+        yield _row(satrec, site, interval.end, downlink_hz)
+
+
+def _row(satrec, site: Site, t, downlink_hz: float):
         r_teme, v_teme = _propagate(satrec, t)
         sat_ecef = teme_to_ecef(r_teme, t)
         vel_ecef = teme_vel_to_ecef(r_teme, v_teme, t)
@@ -39,12 +49,15 @@ def interval_csv_rows(satrec, site: Site, interval: PassInterval,
         rdot = (dx * vel_ecef[0] + dy * vel_ecef[1] + dz * vel_ecef[2]) / rng
         # range increasing -> negative Doppler shift at the receiver
         doppler_hz = -downlink_hz * (rdot * 1000.0) / SPEED_OF_LIGHT
-        yield [
-            t.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        if t.microsecond:
+            stamp = t.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        else:
+            stamp = t.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return [
+            stamp,
             f"{az:.3f}", f"{el:.3f}", f"{rng:.3f}",
             f"{rdot:.6f}", f"{doppler_hz:.1f}",
         ]
-        t += timedelta(seconds=1)
 
 
 def interval_to_dict(sat_id: str, stn_id: str, iv: PassInterval) -> dict:
@@ -77,4 +90,3 @@ def render_csv(rows) -> str:
     w.writerow(CSV_HEADER)
     w.writerows(rows)
     return out.getvalue()
-
